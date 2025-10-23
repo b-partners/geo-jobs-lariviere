@@ -11,6 +11,7 @@ import static app.bpartners.geojobs.repository.model.detection.ZoneDetectionJob.
 import static app.bpartners.geojobs.service.event.GeoJsonConversionTaskConsumer.GEO_JSON_BUCKET_FOLDER;
 import static app.bpartners.geojobs.service.event.GeoJsonConversionTaskConsumer.GEO_JSON_EXTENSION;
 import static java.time.Instant.now;
+import static java.time.Instant.parse;
 
 import app.bpartners.geojobs.endpoint.event.EventProducer;
 import app.bpartners.geojobs.endpoint.event.model.DetectionExcelFileSaved;
@@ -34,7 +35,6 @@ import app.bpartners.geojobs.model.page.BoundedPageSize;
 import app.bpartners.geojobs.model.page.PageFromOne;
 import app.bpartners.geojobs.repository.CommunityAuthorizationRepository;
 import app.bpartners.geojobs.repository.DetectionRepository;
-import app.bpartners.geojobs.repository.DetectionStepRepository;
 import app.bpartners.geojobs.repository.GeoJsonConversionJobRepository;
 import app.bpartners.geojobs.repository.model.community.CommunityAuthorization;
 import app.bpartners.geojobs.repository.model.detection.Detection;
@@ -48,12 +48,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
 import java.nio.file.Files;
+import java.time.Instant;
 import java.util.*;
 import javax.annotation.Nullable;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -61,6 +61,7 @@ import org.springframework.stereotype.Service;
 @Slf4j
 public class ZoneService {
   private static final int DEFAULT_ZOOM = 20;
+  private static final Instant BEGINNING_OF_2024 = parse("2024-01-01T00:00:00Z");
   private final ZoneDetectionJobService zoneDetectionJobService;
   private final ZoneTilingJobService zoneTilingJobService;
   private final EventProducer eventProducer;
@@ -83,7 +84,6 @@ public class ZoneService {
   private final SynchronousDetectionService synchronousDetectionService;
   private final SynchronousDetectionValidator synchronousDetectionValidator;
   private final DetectionStepMapper detectionStepMapper;
-  private final DetectionStepRepository detectionStepRepository;
   private final DetectionFromStepMapper detectionFromStepMapper;
   private final RoofAnalysisMailer roofAnalysisMailer;
   private final DetectionCreationMapper detectionCreationMapper;
@@ -211,6 +211,7 @@ public class ZoneService {
     if (!savedDetection.isOnStepPostProcessingSucceeded()) {
       return updateDetectionStep(
           savedDetection.getEndToEndId(),
+          null,
           new DetectionStep()
               .name(POST_PROCESSING)
               .status(
@@ -399,17 +400,34 @@ public class ZoneService {
   }
 
   public List<app.bpartners.geojobs.endpoint.rest.model.Detection> getDetectionsByCriteria(
-      Optional<String> communityId, PageFromOne page, BoundedPageSize pageSize) {
-    Pageable pageable = PageRequest.of(page.getValue() - 1, pageSize.getValue());
+      Optional<String> communityId,
+      PageFromOne page,
+      BoundedPageSize pageSize,
+      Instant fromParameter,
+      Instant toParameter) {
+    final Instant from = fromParameter == null ? BEGINNING_OF_2024 : fromParameter;
+    final Instant to = toParameter == null ? now() : toParameter;
+    var pageable = PageRequest.of(page.getValue() - 1, pageSize.getValue());
     var detections =
         communityId
-            .map(ownerId -> detectionRepository.findByCommunityOwnerId(ownerId, pageable))
-            .orElseGet(() -> detectionRepository.findAll(pageable).getContent());
+            .map(
+                ownerId ->
+                    detectionRepository
+                        .findByCommunityOwnerIdAndCreationDatetimeBetweenOrderByCreationDatetimeDesc(
+                            ownerId, from, to, pageable))
+            .orElseGet(
+                () ->
+                    detectionRepository.findAllByCreationDatetimeBetweenOrderByCreationDatetimeDesc(
+                        from, to, pageable));
 
-    for (var detection : detections) {
-      detection.setId(detection.getEndToEndId());
-    }
-    return detections.stream().map(this::addStatistics).toList();
+    return detections.stream()
+        .map(
+            detection -> {
+              var restDetectionMapValue =
+                  detection.toBuilder().id(detection.getEndToEndId()).build();
+              return addStatistics(restDetectionMapValue);
+            })
+        .toList();
   }
 
   private app.bpartners.geojobs.endpoint.rest.model.Detection addStatistics(Detection detection) {
@@ -450,12 +468,14 @@ public class ZoneService {
   }
 
   public app.bpartners.geojobs.endpoint.rest.model.Detection updateDetectionStep(
-      String detectionId, DetectionStep step) {
-    var detection = getDetectionByE2IdOrId(detectionId);
+      String detectionId, String communityOwnerId, DetectionStep step) {
+    Detection detection =
+        communityOwnerId == null
+            ? getDetectionByE2IdOrId(detectionId)
+            : getDetectionByE2eId(detectionId, communityOwnerId);
 
-    // TODO: could be more arranged (for eg. detection.addStep(newStep) then save detection with new
-    // step)
-    detectionStepRepository.save(detectionStepMapper.toDomain(detection.getId(), step));
+    detection.addStep(detectionStepMapper.toDomain(detection.getId(), step));
+    detectionRepository.save(detection);
 
     return detectionFromStepMapper.apply(
         detection, detectionStepMapper.toDomain(detection.getId(), step));
