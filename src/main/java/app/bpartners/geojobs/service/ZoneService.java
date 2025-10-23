@@ -10,7 +10,9 @@ import static app.bpartners.geojobs.model.exception.ApiException.ExceptionType.C
 import static app.bpartners.geojobs.repository.model.detection.ZoneDetectionJob.DetectionType.HUMAN;
 import static app.bpartners.geojobs.service.event.GeoJsonConversionTaskConsumer.GEO_JSON_BUCKET_FOLDER;
 import static app.bpartners.geojobs.service.event.GeoJsonConversionTaskConsumer.GEO_JSON_EXTENSION;
+import static app.bpartners.geojobs.service.event.GeoJsonConversionTaskConsumer.ZIP_BUCKET_FOLDER;
 import static java.time.Instant.now;
+import static java.time.Instant.parse;
 
 import app.bpartners.geojobs.endpoint.event.EventProducer;
 import app.bpartners.geojobs.endpoint.event.model.DetectionExcelFileSaved;
@@ -24,6 +26,7 @@ import app.bpartners.geojobs.endpoint.rest.mapper.DetectionFromStepMapper;
 import app.bpartners.geojobs.endpoint.rest.mapper.DetectionStepMapper;
 import app.bpartners.geojobs.endpoint.rest.model.*;
 import app.bpartners.geojobs.endpoint.rest.security.AuthProvider;
+import app.bpartners.geojobs.file.FileWriter;
 import app.bpartners.geojobs.file.bucket.BucketComponent;
 import app.bpartners.geojobs.job.model.Job;
 import app.bpartners.geojobs.job.model.statistic.TaskStatistic;
@@ -34,7 +37,6 @@ import app.bpartners.geojobs.model.page.BoundedPageSize;
 import app.bpartners.geojobs.model.page.PageFromOne;
 import app.bpartners.geojobs.repository.CommunityAuthorizationRepository;
 import app.bpartners.geojobs.repository.DetectionRepository;
-import app.bpartners.geojobs.repository.DetectionStepRepository;
 import app.bpartners.geojobs.repository.GeoJsonConversionJobRepository;
 import app.bpartners.geojobs.repository.model.community.CommunityAuthorization;
 import app.bpartners.geojobs.repository.model.detection.Detection;
@@ -47,20 +49,23 @@ import app.bpartners.geojobs.service.tiling.ZoneTilingJobService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
+import java.time.Instant;
 import java.util.*;
 import javax.annotation.Nullable;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 
 @Service
 @AllArgsConstructor
 @Slf4j
 public class ZoneService {
   private static final int DEFAULT_ZOOM = 20;
+  private static final Instant BEGINNING_OF_2024 = parse("2024-01-01T00:00:00Z");
   private final ZoneDetectionJobService zoneDetectionJobService;
   private final ZoneTilingJobService zoneTilingJobService;
   private final EventProducer eventProducer;
@@ -83,10 +88,10 @@ public class ZoneService {
   private final SynchronousDetectionService synchronousDetectionService;
   private final SynchronousDetectionValidator synchronousDetectionValidator;
   private final DetectionStepMapper detectionStepMapper;
-  private final DetectionStepRepository detectionStepRepository;
   private final DetectionFromStepMapper detectionFromStepMapper;
   private final RoofAnalysisMailer roofAnalysisMailer;
   private final DetectionCreationMapper detectionCreationMapper;
+  private final FileWriter fileWriter;
 
   private List<Feature> readFromFile(File featuresFromShape) {
     try {
@@ -189,21 +194,24 @@ public class ZoneService {
         savedDetection, FINISHED, SUCCEEDED, MACHINE_DETECTION);
   }
 
-  public app.bpartners.geojobs.endpoint.rest.model.Detection configureGeoJsonResult(
-      String detectionE2Id, File geoJsonFile) {
-    var detection = getDetectionByE2IdOrId(detectionE2Id);
-    var geoJsonResultFileKey =
-        GEO_JSON_BUCKET_FOLDER
-            + detection.getId()
-            + "/"
-            + detection.getZoneName()
-            + GEO_JSON_EXTENSION;
-
-    bucketComponent.upload(geoJsonFile, geoJsonResultFileKey);
+  public app.bpartners.geojobs.endpoint.rest.model.Detection configureFileResult(
+      String communityId, String detectionE2eId, MultipartFile file, String extensionType)
+      throws IOException {
+    if (communityId == null) {
+      throw new IllegalArgumentException("To sumbit result, communityAuthorizationId is mandatory");
+    }
+    var detection = getDetectionByE2eId(detectionE2eId, communityId);
+    String extension = "." + extensionType.toLowerCase();
+    var resultFileKey =
+        GEO_JSON_EXTENSION.contains(extension)
+            ? GEO_JSON_BUCKET_FOLDER
+            : ZIP_BUCKET_FOLDER + detection.getId() + "/" + detection.getZoneName() + extension;
+    byte[] fileBytes = file.getBytes();
+    File toUpload = fileWriter.apply(fileBytes, null);
+    bucketComponent.upload(toUpload, resultFileKey);
 
     var savedDetection =
-        detectionRepository.save(
-            detection.toBuilder().geojsonS3FileKey(geoJsonResultFileKey).build());
+        detectionRepository.save(detection.toBuilder().geojsonS3FileKey(resultFileKey).build());
 
     eventProducer.accept(List.of(DetectionSaved.builder().detection(savedDetection).build()));
     eventProducer.accept(List.of(new DetectionSucceeded(detection.getId())));
@@ -211,6 +219,7 @@ public class ZoneService {
     if (!savedDetection.isOnStepPostProcessingSucceeded()) {
       return updateDetectionStep(
           savedDetection.getEndToEndId(),
+          communityId,
           new DetectionStep()
               .name(POST_PROCESSING)
               .status(
@@ -399,17 +408,34 @@ public class ZoneService {
   }
 
   public List<app.bpartners.geojobs.endpoint.rest.model.Detection> getDetectionsByCriteria(
-      Optional<String> communityId, PageFromOne page, BoundedPageSize pageSize) {
-    Pageable pageable = PageRequest.of(page.getValue() - 1, pageSize.getValue());
+      Optional<String> communityId,
+      PageFromOne page,
+      BoundedPageSize pageSize,
+      Instant fromParameter,
+      Instant toParameter) {
+    final Instant from = fromParameter == null ? BEGINNING_OF_2024 : fromParameter;
+    final Instant to = toParameter == null ? now() : toParameter;
+    var pageable = PageRequest.of(page.getValue() - 1, pageSize.getValue());
     var detections =
         communityId
-            .map(ownerId -> detectionRepository.findByCommunityOwnerId(ownerId, pageable))
-            .orElseGet(() -> detectionRepository.findAll(pageable).getContent());
+            .map(
+                ownerId ->
+                    detectionRepository
+                        .findByCommunityOwnerIdAndCreationDatetimeBetweenOrderByCreationDatetimeDesc(
+                            ownerId, from, to, pageable))
+            .orElseGet(
+                () ->
+                    detectionRepository.findAllByCreationDatetimeBetweenOrderByCreationDatetimeDesc(
+                        from, to, pageable));
 
-    for (var detection : detections) {
-      detection.setId(detection.getEndToEndId());
-    }
-    return detections.stream().map(this::addStatistics).toList();
+    return detections.stream()
+        .map(
+            detection -> {
+              var restDetectionMapValue =
+                  detection.toBuilder().id(detection.getEndToEndId()).build();
+              return addStatistics(restDetectionMapValue);
+            })
+        .toList();
   }
 
   private app.bpartners.geojobs.endpoint.rest.model.Detection addStatistics(Detection detection) {
@@ -450,12 +476,14 @@ public class ZoneService {
   }
 
   public app.bpartners.geojobs.endpoint.rest.model.Detection updateDetectionStep(
-      String detectionId, DetectionStep step) {
-    var detection = getDetectionByE2IdOrId(detectionId);
+      String detectionId, String communityOwnerId, DetectionStep step) {
+    Detection detection =
+        communityOwnerId == null
+            ? getDetectionByE2IdOrId(detectionId)
+            : getDetectionByE2eId(detectionId, communityOwnerId);
 
-    // TODO: could be more arranged (for eg. detection.addStep(newStep) then save detection with new
-    // step)
-    detectionStepRepository.save(detectionStepMapper.toDomain(detection.getId(), step));
+    detection.addStep(detectionStepMapper.toDomain(detection.getId(), step));
+    detectionRepository.save(detection);
 
     return detectionFromStepMapper.apply(
         detection, detectionStepMapper.toDomain(detection.getId(), step));

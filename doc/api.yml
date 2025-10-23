@@ -468,6 +468,50 @@ paths:
                   $ref: "#/components/schemas/DetectedParcel"
         '500':
           $ref: '#/components/responses/500'
+  '/communities/{communityId}/detections/{id}/fileResult':
+    post:
+      tags:
+        - Detection
+      operationId: configureDetectionFileResult
+      parameters:
+        - in: path
+          name: communityId
+          description: Community owner identifier
+          schema:
+            type: string
+          required: true
+        - in: path
+          name: id
+          description: Detection e2eId
+          schema:
+            type: string
+          required: true
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  format: binary
+                  description: GeoJSON or ZIP file to upload
+                extensionType:
+                  format: string
+                  description: File extension
+      responses:
+        '200':
+          description: Detection with updated geojson URL
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Detection'
+        '400':
+          $ref: '#/components/responses/400'
+        '500':
+          $ref: '#/components/responses/500'
   '/detectionJobs/{id}/geojsonsUrl':
     get:
       tags:
@@ -586,6 +630,18 @@ paths:
           name: pageSize
           schema:
             $ref: "#/components/schemas/PageSize"
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+          required: false
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+          required: false
       responses:
         200:
           description: List of detections
@@ -647,6 +703,7 @@ paths:
                 $ref: '#/components/schemas/Detection'
   '/detections/{id}/step':
     put:
+      deprecated: true
       tags:
         - Detection
       operationId: updateDetectionStep
@@ -656,6 +713,41 @@ paths:
       security:
         - ApiKeyAuth: [ ]
       parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          description: Detection identifier
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectionStep'
+      responses:
+        200:
+          description: Detection with updated step
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Detection'
+  '/communities/{communityOwnerId}/detections/{id}/step':
+    put:
+      tags:
+        - Detection
+      operationId: updateCommunityDetectionStep
+      summary: Update detection step for specific community detection
+      description: |
+        Update detection step for specific community detection
+      security:
+        - ApiKeyAuth: [ ]
+      parameters:
+        - in: path
+          name: communityOwnerId
+          schema:
+            type: string
+          description: Community owner identifier
+          required: true
         - in: path
           name: id
           schema:
@@ -1816,6 +1908,9 @@ components:
             type: string
         roofDelimiter:
           $ref: '#/components/schemas/RoofDelimiter'
+        creationDatetime:
+          type: string
+          format: date-time
     Prospect:
       type: object
       properties:
