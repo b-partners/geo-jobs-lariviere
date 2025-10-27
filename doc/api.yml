@@ -486,6 +486,12 @@ paths:
           schema:
             type: string
           required: true
+        - in: query
+          name: extensionType
+          description: Detection e2eId
+          schema:
+            type: string
+          required: false
       requestBody:
         required: true
         content:
@@ -496,9 +502,6 @@ paths:
                 file:
                   format: binary
                   description: GeoJSON or ZIP file to upload
-                extensionType:
-                  format: string
-                  description: File extension
       responses:
         '200':
           description: Detection with updated geojson URL
@@ -1324,7 +1327,11 @@ components:
           type: string
     DetectionSurfaceUnit:
       type: string
+      x-enum-varnames:
+        - SQUARE_METER
+        - SQUARE_DEGREE
       enum:
+        - SQUARE_METER
         - SQUARE_DEGREE
     DetectionSurfaceValue:
       type: object

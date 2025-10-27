@@ -214,7 +214,7 @@ public class ZoneDetectionController {
       @PathVariable(name = "communityId") String communityOwnerId,
       @PathVariable(name = "id") String detectionId,
       @RequestPart(value = "file") MultipartFile file,
-      @RequestPart(value = "extensionType") String extensionType)
+      @RequestParam(value = "extensionType", defaultValue = "zip") String extensionType)
       throws IOException {
     return zoneService.configureFileResult(communityOwnerId, detectionId, file, extensionType);
   }
@@ -297,8 +297,7 @@ public class ZoneDetectionController {
 
   @GetMapping("/usage")
   public DetectionUsage getDetectionUsage(
-      @RequestParam(name = "surfaceUnit", required = false, defaultValue = "SQUARE_DEGREE")
-          DetectionSurfaceUnit surfaceUnit) {
+      @RequestParam(name = "surfaceUnit", required = false) DetectionSurfaceUnit surfaceUnit) {
     getUsageValidator.accept(authProvider.getPrincipal());
     return communityUsedSurfaceService.getUsage(
         authProvider.getPrincipal(), unitMapper.toDomain(surfaceUnit));
