@@ -2,6 +2,7 @@ package app.bpartners.geojobs.service.geojson;
 
 import static app.bpartners.geojobs.endpoint.rest.model.Feature.TypeEnum.FEATURE;
 import static app.bpartners.geojobs.endpoint.rest.model.Geometry.TypeEnum.MULTI_POLYGON;
+import static app.bpartners.geojobs.endpoint.rest.model.Geometry.TypeEnum.POINT;
 import static app.bpartners.geojobs.endpoint.rest.model.Polygon.TypeEnum.POLYGON;
 
 import app.bpartners.geojobs.endpoint.rest.model.FeatureGeometry;
@@ -47,6 +48,20 @@ public class GeometryConverter {
             Feature.FeatureGeometry.builder()
                 .geometryType(MULTI_POLYGON)
                 .actualInstanceStringValue(writeMultiPolygonAsString(multiPolygon))
+                .build())
+        .properties(new HashMap<>(properties))
+        .build();
+  }
+
+  public Feature toFeature(
+      String featureId, Integer zoom, Map<String, Object> properties, Point point) {
+    return Feature.builder()
+        .id(featureId)
+        .zoom(zoom)
+        .geometry(
+            Feature.FeatureGeometry.builder()
+                .geometryType(POINT)
+                .actualInstanceStringValue(writeMultiPolygonAsString(point))
                 .build())
         .properties(new HashMap<>(properties))
         .build();
@@ -373,10 +388,10 @@ public class GeometryConverter {
   }
 
   @SneakyThrows
-  public String writeMultiPolygonAsString(MultiPolygon multiPolygon) {
+  public String writeMultiPolygonAsString(Geometry geometry) {
     GeometryJSON geometryJSON = new GeometryJSON(15);
     StringWriter writer = new StringWriter();
-    geometryJSON.write(multiPolygon, writer);
+    geometryJSON.write(geometry, writer);
     return writer.toString();
   }
 
@@ -469,5 +484,37 @@ public class GeometryConverter {
     double my = Math.log(Math.tan((90 + lat.doubleValue()) * Math.PI / 360.0)) / (Math.PI / 180.0);
     my = my * originShift / 180.0;
     return List.of(BigDecimal.valueOf(mx), BigDecimal.valueOf(my));
+  }
+
+  public Polygon retrievePolygonGeometry(
+      app.bpartners.geojobs.endpoint.rest.model.Feature feature) {
+    var geometryInstance = feature.getGeometry().getActualInstance();
+    switch (geometryInstance) {
+      case app.bpartners.geojobs.endpoint.rest.model.Point point -> {
+        var nearestRoofMultiPolygon = retrieveNearestRoofMultiPolygon(point);
+        if (nearestRoofMultiPolygon.getNumGeometries() > 1) {
+          log.error("Unable to handle multiple polygons for feature : {}", feature);
+          return null;
+        } else {
+          return (Polygon) nearestRoofMultiPolygon.getGeometryN(0);
+        }
+      }
+      case app.bpartners.geojobs.endpoint.rest.model.Polygon restPolygon -> {
+        return convertToPolygon(restPolygon.getCoordinates().getFirst());
+      }
+      case app.bpartners.geojobs.endpoint.rest.model.MultiPolygon restMultiPolygon -> {
+        var jtsMultiPolygon = apply(restMultiPolygon.getCoordinates());
+        if (jtsMultiPolygon.getNumGeometries() > 1) {
+          log.error("Unable to handle multiPolygons for feature : {}", feature);
+          return null;
+        } else {
+          return (Polygon) jtsMultiPolygon.getGeometryN(0);
+        }
+      }
+      default -> {
+        log.error("Unable to handle geometry type : {}", geometryInstance);
+        return null;
+      }
+    }
   }
 }

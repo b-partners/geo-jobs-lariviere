@@ -3,16 +3,16 @@ package app.bpartners.geojobs.service.event;
 import static java.util.UUID.randomUUID;
 
 import app.bpartners.geojobs.endpoint.event.EventProducer;
-import app.bpartners.geojobs.endpoint.event.model.ZoneImageRequested;
+import app.bpartners.geojobs.endpoint.event.model.FeatureImageRequested;
 import app.bpartners.geojobs.endpoint.event.model.zone.ZoneDetectionJobCreated;
 import app.bpartners.geojobs.endpoint.event.model.zone.ZoneTilingJobFailed;
 import app.bpartners.geojobs.endpoint.event.model.zone.ZoneTilingJobStatusChanged;
 import app.bpartners.geojobs.repository.DetectableObjectConfigurationRepository;
 import app.bpartners.geojobs.repository.DetectionRepository;
+import app.bpartners.geojobs.repository.TilingTaskRepository;
 import app.bpartners.geojobs.repository.model.tiling.ZoneTilingJob;
 import app.bpartners.geojobs.service.DetectionDelimitationRetriever;
 import app.bpartners.geojobs.service.JobFinishedMailer;
-import app.bpartners.geojobs.service.PointExtendedImageRequest;
 import app.bpartners.geojobs.service.StatusChangedHandler;
 import app.bpartners.geojobs.service.detection.ZoneDetectionJobService;
 import java.util.List;
@@ -32,7 +32,7 @@ public class ZoneTilingJobStatusChangedService implements Consumer<ZoneTilingJob
   private final EventProducer eventProducer;
   private final DetectableObjectConfigurationRepository objectConfigurationRepository;
   private final DetectionDelimitationRetriever detectionDelimitationRetriever;
-  private final PointExtendedImageRequest pointExtendedImageRequest;
+  private final TilingTaskRepository tilingTaskRepository;
 
   @Override
   public void accept(ZoneTilingJobStatusChanged event) {
@@ -48,7 +48,7 @@ public class ZoneTilingJobStatusChangedService implements Consumer<ZoneTilingJob
             detectionRepository,
             objectConfigurationRepository,
             detectionDelimitationRetriever,
-            pointExtendedImageRequest);
+            tilingTaskRepository);
 
     var onFailedHandler = new onFailedJobHandler(eventProducer, newJob);
 
@@ -60,17 +60,25 @@ public class ZoneTilingJobStatusChangedService implements Consumer<ZoneTilingJob
       EventProducer eventProducer,
       JobFinishedMailer<ZoneTilingJob> tilingFinishedMailer,
       ZoneDetectionJobService zoneDetectionJobService,
-      ZoneTilingJob ztj,
+      ZoneTilingJob zoneTilingJob,
       DetectionRepository detectionRepository,
       DetectableObjectConfigurationRepository objectConfigurationRepository,
       DetectionDelimitationRetriever detectionDelimitationRetriever,
-      PointExtendedImageRequest pointExtendedImageRequest)
+      TilingTaskRepository tilingTaskRepository)
       implements Runnable {
 
     @Override
     public void run() {
-      var zdj = zoneDetectionJobService.saveZDJFromZTJ(ztj);
-      var optionalDetection = detectionRepository.findByZtjId(ztj.getId());
+      if (tilingTaskRepository.findAllByJobId(zoneTilingJob.getId()).stream()
+          .anyMatch(
+              task ->
+                  task.getTiles().stream()
+                      .anyMatch(tile -> tile.getBucketPath().contains(".xml")))) {
+        eventProducer.accept(List.of(new ZoneTilingJobFailed(zoneTilingJob)));
+        return;
+      }
+      var zdj = zoneDetectionJobService.saveZDJFromZTJ(zoneTilingJob);
+      var optionalDetection = detectionRepository.findByZtjId(zoneTilingJob.getId());
       // For now, only detection process triggers ZDJ processing
       if (optionalDetection.isPresent()) {
         var detection = optionalDetection.get();
@@ -87,24 +95,18 @@ public class ZoneTilingJobStatusChangedService implements Consumer<ZoneTilingJob
 
         detectionDelimitationRetriever.accept(savedDetection);
 
-        savedDetection
-            .getProvidedGeoJsonZone()
-            .forEach(
-                providedFeature ->
-                    pointExtendedImageRequest.accept(savedDetection, providedFeature, false));
-
-        if (savedDetection.getSplitPolygonGeoJsonZone() != null
-            && !savedDetection.getSplitPolygonGeoJsonZone().isEmpty()
-            && savedDetection.needsImageOutput()) {
-          eventProducer.accept(
-              List.of(
-                  ZoneImageRequested.builder()
-                      .detectionIdentifier(savedDetection.getId())
-                      .build()));
+        if (savedDetection.needsImageOutput()) {
+          var detectionIdentifier = savedDetection.getId();
+          var providedGeoJsonZone = savedDetection.getProvidedGeoJsonZone();
+          for (int i = 0; i < providedGeoJsonZone.size(); i++) {
+            eventProducer.accept(
+                List.of(
+                    new FeatureImageRequested(detectionIdentifier, providedGeoJsonZone.get(i), i)));
+          }
         }
       }
-      tilingFinishedMailer.accept(ztj);
-      log.info("Finished, mail sent, ztj=" + ztj);
+      tilingFinishedMailer.accept(zoneTilingJob);
+      log.info("Finished, mail sent, ztj=" + zoneTilingJob);
     }
   }
 

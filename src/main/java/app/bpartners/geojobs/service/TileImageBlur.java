@@ -30,7 +30,7 @@ public class TileImageBlur implements BiFunction<Detection, List<Tile>, List<Til
   private final GeometryConverter geometryConverter;
   private final FilePolygonDrawer filePolygonDrawer;
   private final DetectionBackgroundRetriever detectionBackgroundRetriever;
-  private final DetectionProvidedZoneUnifier detectionProvidedZoneUnifier;
+  private final DetectionZoneToProcessProvider detectionProvidedZoneUnifier;
 
   @Override
   public List<Tile> apply(Detection detection, List<Tile> tiles) {
@@ -68,7 +68,8 @@ public class TileImageBlur implements BiFunction<Detection, List<Tile>, List<Til
               var tileWithoutRoofInsideTileAndZone =
                   multiPolygonFromTile.difference(roofInsideTileAndProvidedZone);
               List<List<List<IntXY>>> multiPolygonPixelCoordinates;
-              if (intersectionBetweenTileMultiPolygonAndBackground.isEmpty()) {
+              if (intersectionBetweenTileMultiPolygonAndBackground == null
+                  || intersectionBetweenTileMultiPolygonAndBackground.isEmpty()) {
                 multiPolygonPixelCoordinates = getBlurAllAreaCoordinates();
               } else {
                 var backgroundMultiPolygonPixels =

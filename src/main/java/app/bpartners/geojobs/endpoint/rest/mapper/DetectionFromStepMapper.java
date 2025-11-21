@@ -11,8 +11,10 @@ import app.bpartners.geojobs.endpoint.rest.model.Feature;
 import app.bpartners.geojobs.endpoint.rest.model.RoofDelimiter;
 import app.bpartners.geojobs.file.bucket.BucketComponent;
 import app.bpartners.geojobs.repository.model.detection.DetectionStep;
+import app.bpartners.geojobs.repository.model.detection.FeatureWithDelimitation;
 import app.bpartners.geojobs.service.DetectionFeaturesResultImageRetriever;
 import app.bpartners.geojobs.service.DetectionImageAttributeRetriever;
+import app.bpartners.geojobs.service.DetectionImageTileInfoOriginRetriever;
 import app.bpartners.geojobs.service.DetectionVggAttributeRetriever;
 import java.math.BigDecimal;
 import java.util.HashMap;
@@ -20,8 +22,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.BiFunction;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class DetectionFromStepMapper
@@ -33,6 +37,7 @@ public class DetectionFromStepMapper
   private final DetectionVggAttributeRetriever vggAttributeRetriever;
   private final DetectionStepMapper detectionStepMapper;
   private final RoofDelimiterMapper roofDelimiterMapper;
+  private final DetectionImageTileInfoOriginRetriever imageTileInfoOriginRetriever;
 
   @Override
   public Detection apply(
@@ -44,24 +49,29 @@ public class DetectionFromStepMapper
   public Detection apply(
       app.bpartners.geojobs.repository.model.detection.Detection detection,
       app.bpartners.geojobs.endpoint.rest.model.DetectionStep restStep) {
+    var providedGeoJsonZone = detection.getProvidedGeoJsonZone();
+    var geometryProvidedCount = providedGeoJsonZone == null ? 0 : providedGeoJsonZone.size();
     var features = featuresImageRetriever.apply(detection);
-    var imageUrl = imageAttributeRetriever.apply(detection);
-    var vggUrl = vggAttributeRetriever.apply(detection);
+    var imageUrl = geometryProvidedCount != 1 ? null : imageAttributeRetriever.apply(detection);
+    var vggUrl = geometryProvidedCount != 1 ? null : vggAttributeRetriever.apply(detection);
     var excelUrl = bucketComponent.presign(detection.getExcelFileKey());
     var shapeUrl = bucketComponent.presign(detection.getShapeFileKey());
     var geojsonUrl = bucketComponent.presign(detection.getGeojsonS3FileKey());
     var pdfUrl = bucketComponent.presign(detection.getPdfFileKey());
     var featuresWithHiddenProperties = hideUselessRestProperties(features);
+    var imageTileInfoOrigin = imageTileInfoOriginRetriever.apply(detection);
 
     return new Detection()
         .id(detection.getEndToEndId())
         .emailReceiver(detection.getEmailReceiver())
         .zoneName(detection.getZoneName())
         .excelUrl(excelUrl)
+        .toNotify(detection.isToNotify())
         .shapeUrl(shapeUrl)
         .geoJsonZone(featuresWithHiddenProperties)
         .geoJsonUrl(geojsonUrl)
         .imageUrl(imageUrl)
+        .imageTileInfoOrigin(imageTileInfoOrigin)
         .pdfUrl(pdfUrl)
         .vggUrl(vggUrl)
         .geoServerProperties(detection.getGeoServerProperties())
@@ -108,6 +118,16 @@ public class DetectionFromStepMapper
       }
 
       return new RoofDelimiter().polygon(polygonRoofDelimitation);
+    } else if (featureWithDelimitations.size() != 1
+        || featureWithDelimitations.stream()
+                .map(FeatureWithDelimitation::delimitations)
+                .mapToLong(List::size)
+                .sum()
+            != 1) {
+      log.warn(
+          "UnsupportedOperation: RoofDelimiter can be only computed when unique roof delimitation"
+              + " obtained");
+      return null;
     }
 
     var featureDelimitation = featureWithDelimitations.getFirst().delimitations().getFirst();
@@ -115,7 +135,7 @@ public class DetectionFromStepMapper
     if (properties == null
         || !properties.containsKey(ROOF_SLOPE_PROPERTY_NAME)
         || !properties.containsKey(ROOF_HEIGHT_PROPERTY_NAME)) {
-      return new RoofDelimiter().polygon(polygonRoofDelimitation);
+      return new RoofDelimiter().polygon(roofDelimiterMapper.toRestPolygon(featureDelimitation));
     }
 
     var roofSlope = ((Number) properties.get(ROOF_SLOPE_PROPERTY_NAME)).doubleValue();

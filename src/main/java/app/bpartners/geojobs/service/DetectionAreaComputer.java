@@ -27,6 +27,9 @@ public class DetectionAreaComputer implements Function<Detection, Double> {
   }
 
   public Double apply(List<Feature> geoJsonZone) {
+    if (geoJsonZone == null || geoJsonZone.isEmpty()) {
+      return 0.0;
+    }
     var unifiedProvidedPolygon =
         geoJsonZone.stream()
             .map(
@@ -34,7 +37,9 @@ public class DetectionAreaComputer implements Function<Detection, Double> {
                   var geometryType = feature.getGeometry().getActualInstance();
                   org.locationtech.jts.geom.MultiPolygon geometry;
                   switch (geometryType) {
-                    case Point ignored -> geometry = null;
+                    // TODO: only used for BP_TOITURE model so must be fixed
+                    case Point point ->
+                        geometry = geometryConverter.retrieveNearestRoofMultiPolygon(point);
                     case Polygon polygon ->
                         geometry = geometryConverter.apply(List.of(polygon.getCoordinates()));
                     case MultiPolygon multiPolygon ->
